@@ -19,7 +19,7 @@
 
 #include <zephyr/settings/settings.h>
 
-#include "kalman_filter.h" // Add this include for the Kalman filter implementation
+#include "kalman_filter.h"
 
 #define MAX_RETRIES 5
 #define RETRY_DELAY K_MSEC(10)
@@ -31,7 +31,7 @@
 static struct sensor_value accel_x_out, accel_y_out, accel_z_out;
 static struct sensor_value gyro_x_out, gyro_y_out, gyro_z_out;
 
-static KalmanFilter kf;  // Declare a Kalman filter instance
+static KalmanFilter kf __attribute__((section(".data")));
 
 struct sensor_data {
     uint32_t timestamp;
@@ -341,8 +341,9 @@ void main(void)
         printk("No valid calibration data found. Please calibrate the sensors.\n");
     }
 
-    // Initialize Kalman filter
+    printk("About to initialize Kalman filter\n");
     kalman_filter_init(&kf);
+    printk("Kalman filter initialized\n");
 
     while (1) {
         if (sensor_sample_fetch(lsm6dsl_dev) < 0) {
@@ -366,8 +367,15 @@ void main(void)
                 sensor_value_to_double(&gyro_z_out)
             };
 
-            // Apply calibration
             apply_calibration(accel, gyro);
+
+            printk("Applying Kalman filter prediction...\n");
+            kalman_filter_predict(&kf);
+            printk("Prediction step completed.\n");
+
+            // Print the state estimate after prediction
+            printk("State estimate after prediction: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+                kf.x[0], kf.x[1], kf.x[2], kf.x[3], kf.x[4], kf.x[5]);
 
             // Prepare measurement for Kalman filter
             float measurement[MEASURE_DIM] = {
@@ -375,11 +383,26 @@ void main(void)
                 gyro[0], gyro[1], gyro[2]
             };
 
-            // Apply Kalman filter
-            kalman_filter_predict(&kf);
+            printk("Measurement: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+                measurement[0], measurement[1], measurement[2],
+                measurement[3], measurement[4], measurement[5]);
+
+            printk("Applying Kalman filter update...\n");
+
+            // Lock the scheduler to protect the critical section
+            k_sched_lock();
+
             kalman_filter_update(&kf, measurement);
 
-            // Use filtered values
+            // Unlock the scheduler after the critical section
+            k_sched_unlock();
+
+            printk("Update step completed.\n");
+
+            // Print the state estimate after update
+            // printk("State estimate after update: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+            //     kf.x[0], kf.x[1], kf.x[2], kf.x[3], kf.x[4], kf.x[5]);
+
             s_data.timestamp = k_uptime_get_32() - reference_timestamp;
             s_data.index = index;
             s_data.accel_x = kf.x[0];
