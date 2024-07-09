@@ -21,8 +21,6 @@
 
 #include "kalman_filter.h" // Add this include for the Kalman filter implementation
 
-static KalmanFilter kf;  // Declare a Kalman filter instance
-
 #define MAX_RETRIES 5
 #define RETRY_DELAY K_MSEC(10)
 #define BATTERY_UPDATE_INTERVAL K_MSEC(1000)
@@ -32,6 +30,8 @@ static KalmanFilter kf;  // Declare a Kalman filter instance
 
 static struct sensor_value accel_x_out, accel_y_out, accel_z_out;
 static struct sensor_value gyro_x_out, gyro_y_out, gyro_z_out;
+
+static KalmanFilter kf;  // Declare a Kalman filter instance
 
 struct sensor_data {
     uint32_t timestamp;
@@ -340,6 +340,9 @@ void main(void)
     } else {
         printk("No valid calibration data found. Please calibrate the sensors.\n");
     }
+
+    // Initialize Kalman filter
+    kalman_filter_init(&kf);
 
     while (1) {
         if (sensor_sample_fetch(lsm6dsl_dev) < 0) {
