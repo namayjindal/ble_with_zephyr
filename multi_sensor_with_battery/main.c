@@ -17,12 +17,21 @@
 #include <stdlib.h>
 #include "battery/battery.h"
 
+#include <zephyr/settings/settings.h>
+
+#include "kalman_filter.h"
+
 #define MAX_RETRIES 5
 #define RETRY_DELAY K_MSEC(10)
 #define BATTERY_UPDATE_INTERVAL K_MSEC(1000)
 
+#define CALIBRATION_SAMPLES 100
+#define CALIBRATION_INTERVAL K_MSEC(10)
+
 static struct sensor_value accel_x_out, accel_y_out, accel_z_out;
 static struct sensor_value gyro_x_out, gyro_y_out, gyro_z_out;
+
+static KalmanFilter kf __attribute__((section(".data")));
 
 struct sensor_data {
     uint32_t timestamp;
@@ -36,6 +45,14 @@ struct sensor_data {
     uint8_t battery_percentage;
 } __packed;
 
+struct calibration_data {
+    bool valid;
+    float accel_offset[3];
+    float gyro_offset[3];
+};
+
+static struct calibration_data cal_data = {false, {0}, {0}};
+
 static struct sensor_data s_data;
 static uint32_t reference_timestamp = 0;
 static uint8_t current_battery_percentage = 0;
@@ -45,6 +62,35 @@ static ssize_t read_index(struct bt_conn *conn, const struct bt_gatt_attr *attr,
     const struct sensor_data *data = attr->user_data;
     return bt_gatt_attr_read(conn, attr, buf, len, offset, data, sizeof(*data));
 }
+
+// Add these functions for saving and loading calibration data
+static int settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+    const char *next;
+    int rc;
+
+    if (settings_name_steq(name, "cal", &next) && !next) {
+        if (len != sizeof(cal_data)) {
+            return -EINVAL;
+        }
+        rc = read_cb(cb_arg, &cal_data, sizeof(cal_data));
+        if (rc < 0) {
+            return rc;
+        }
+    }
+
+    return 0;
+}
+
+static int save_calibration_data(void)
+{
+    return settings_save_one("sensor/cal", &cal_data, sizeof(cal_data));
+}
+
+static struct settings_handler conf = {
+    .name = "sensor",
+    .h_set = settings_set
+};
 
 static uint32_t index = 0;
 
@@ -97,24 +143,102 @@ static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
     printk("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
 }
 
-/*Left Hand - (0x6E400001, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)*/
+// Modify the BLE write handler to accept the device pointer
+static ssize_t write_reference_and_calibration(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                               const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+    const struct device *sensor_dev = attr->user_data;
+    
+    if (offset != 0) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+
+    if (len == sizeof(uint32_t)) {
+        // This is a reference timestamp write
+        reference_timestamp = k_uptime_get_32();
+        index = 0;
+        printk("Board written to. Timestamp reset to %u, index reset to 0\n", reference_timestamp);
+        return len;
+    } else if (len == 1) {
+        // This is a calibration trigger
+        const uint8_t *value = buf;
+        if (value[0] == 1) {
+            calibrate_sensors(sensor_dev);
+            printk("Calibration triggered via BLE\n");
+        }
+        return len;
+    } else {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+}
 
 /*Right Hand - (0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)*/
 
-/*Ball - (0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)*/
+/*Left Hand - (0x6E400001, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)*/
 
 /*Sense Right Leg - (0x7E400001, 0xA5B3, 0xC393, 0xD0E9, 0xF50E24DCCA9E)*/
 
 /*Sense Left Leg - (0x6E400001, 0xB5C3, 0xD393, 0xA0F9, 0xE50F24DCCA9E)*/
 
+/*Ball - (0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)*/
+
+// Modify your BLE service definition to pass the device pointer
 BT_GATT_SERVICE_DEFINE(index_svc,
-    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E))),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400002, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
                            BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_index, NULL, &s_data),
     BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400006, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
-                           BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_reference, NULL)
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400003, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
+                           BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_reference_and_calibration, (void*)DEVICE_DT_GET_ONE(st_lsm6dsl))
 );
+
+void calibrate_sensors(const struct device *dev) {
+    struct sensor_value accel[3], gyro[3];
+    float accel_sum[3] = {0}, gyro_sum[3] = {0};
+
+    printk("Starting sensor calibration...\n");
+
+    for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+        sensor_sample_fetch(dev);
+        sensor_channel_get(dev, SENSOR_CHAN_ACCEL_XYZ, accel);
+        sensor_channel_get(dev, SENSOR_CHAN_GYRO_XYZ, gyro);
+
+        for (int j = 0; j < 3; j++) {
+            accel_sum[j] += sensor_value_to_double(&accel[j]);
+            gyro_sum[j] += sensor_value_to_double(&gyro[j]);
+        }
+
+        k_sleep(CALIBRATION_INTERVAL);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        cal_data.accel_offset[i] = accel_sum[i] / CALIBRATION_SAMPLES;
+        cal_data.gyro_offset[i] = gyro_sum[i] / CALIBRATION_SAMPLES;
+    }
+
+    printk("Calibration complete.\n");
+    printk("Accel offsets: [%.2f, %.2f, %.2f]\n", cal_data.accel_offset[0], cal_data.accel_offset[1], cal_data.accel_offset[2]);
+    printk("Gyro offsets: [%.2f, %.2f, %.2f]\n", cal_data.gyro_offset[0], cal_data.gyro_offset[1], cal_data.gyro_offset[2]);
+
+    cal_data.valid = true;
+    
+    // Save calibration data
+    int err = save_calibration_data();
+    if (err) {
+        printk("Failed to save calibration data: %d\n", err);
+    } else {
+        printk("Calibration data saved successfully\n");
+    }
+}
+
+
+// Apply calibration to sensor readings
+void apply_calibration(float *accel, float *gyro) {
+    for (int i = 0; i < 3; i++) {
+        accel[i] -= cal_data.accel_offset[i];
+        gyro[i] -= cal_data.gyro_offset[i];
+    }
+}
 
 static void battery_update_handler(struct k_work *work)
 {
@@ -138,7 +262,7 @@ void main(void)
     index = 0;
     const struct bt_data ad[] = {
         BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
+        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
     };
     const struct bt_data sd[] = {
         BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
@@ -191,6 +315,36 @@ void main(void)
     // Initial battery reading
     k_work_submit(&battery_work);
 
+    err = settings_subsys_init();
+    if (err) {
+        printk("settings subsys initialization: fail (err %d)\n", err);
+        return;
+    }
+
+    err = settings_register(&conf);
+    if (err) {
+        printk("settings register: fail (err %d)\n", err);
+        return;
+    }
+
+    // Load saved settings
+    err = settings_load();
+    if (err) {
+        printk("settings load: fail (err %d)\n", err);
+    }
+
+    if (cal_data.valid) {
+        printk("Loaded calibration data:\n");
+        printk("Accel offsets: [%.2f, %.2f, %.2f]\n", cal_data.accel_offset[0], cal_data.accel_offset[1], cal_data.accel_offset[2]);
+        printk("Gyro offsets: [%.2f, %.2f, %.2f]\n", cal_data.gyro_offset[0], cal_data.gyro_offset[1], cal_data.gyro_offset[2]);
+    } else {
+        printk("No valid calibration data found. Please calibrate the sensors.\n");
+    }
+
+    printk("About to initialize Kalman filter\n");
+    kalman_filter_init(&kf);
+    printk("Kalman filter initialized\n");
+
     while (1) {
         if (sensor_sample_fetch(lsm6dsl_dev) < 0) {
             printk("Sensor sample update error\n");
@@ -202,14 +356,61 @@ void main(void)
             sensor_channel_get(lsm6dsl_dev, SENSOR_CHAN_GYRO_Y, &gyro_y_out);
             sensor_channel_get(lsm6dsl_dev, SENSOR_CHAN_GYRO_Z, &gyro_z_out);
 
+            float accel[3] = {
+                sensor_value_to_double(&accel_x_out),
+                sensor_value_to_double(&accel_y_out),
+                sensor_value_to_double(&accel_z_out)
+            };
+            float gyro[3] = {
+                sensor_value_to_double(&gyro_x_out),
+                sensor_value_to_double(&gyro_y_out),
+                sensor_value_to_double(&gyro_z_out)
+            };
+
+            apply_calibration(accel, gyro);
+
+            printk("Applying Kalman filter prediction...\n");
+            kalman_filter_predict(&kf);
+            printk("Prediction step completed.\n");
+
+            // Print the state estimate after prediction
+            printk("State estimate after prediction: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+                kf.x[0], kf.x[1], kf.x[2], kf.x[3], kf.x[4], kf.x[5]);
+
+            // Prepare measurement for Kalman filter
+            float measurement[MEASURE_DIM] = {
+                accel[0], accel[1], accel[2],
+                gyro[0], gyro[1], gyro[2]
+            };
+
+            printk("Measurement: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+                measurement[0], measurement[1], measurement[2],
+                measurement[3], measurement[4], measurement[5]);
+
+            printk("Applying Kalman filter update...\n");
+
+            // Lock the scheduler to protect the critical section
+            k_sched_lock();
+
+            kalman_filter_update(&kf, measurement);
+
+            // Unlock the scheduler after the critical section
+            k_sched_unlock();
+
+            printk("Update step completed.\n");
+
+            // Print the state estimate after update
+            // printk("State estimate after update: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]\n",
+            //     kf.x[0], kf.x[1], kf.x[2], kf.x[3], kf.x[4], kf.x[5]);
+
             s_data.timestamp = k_uptime_get_32() - reference_timestamp;
             s_data.index = index;
-            s_data.accel_x = sensor_value_to_double(&accel_x_out);
-            s_data.accel_y = sensor_value_to_double(&accel_y_out);
-            s_data.accel_z = sensor_value_to_double(&accel_z_out);
-            s_data.gyro_x = sensor_value_to_double(&gyro_x_out);
-            s_data.gyro_y = sensor_value_to_double(&gyro_y_out);
-            s_data.gyro_z = sensor_value_to_double(&gyro_z_out);
+            s_data.accel_x = kf.x[0];
+            s_data.accel_y = kf.x[1];
+            s_data.accel_z = kf.x[2];
+            s_data.gyro_x = kf.x[3];
+            s_data.gyro_y = kf.x[4];
+            s_data.gyro_z = kf.x[5];
             s_data.battery_percentage = current_battery_percentage;
 
             printk("Timestamp: %u, Index: %u, Accel: [%.3f, %.3f, %.3f], Gyro: [%.3f, %.3f, %.3f], Battery: %u%%\n", 
@@ -226,7 +427,7 @@ void main(void)
             }
 
             index++;
-            k_sleep(K_MSEC(50)); 
+            k_sleep(K_MSEC(30)); 
         }
 
         // Check if it's time to update battery percentage
