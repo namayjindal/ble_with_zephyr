@@ -28,10 +28,7 @@
 #define CALIBRATION_SAMPLES 100
 #define CALIBRATION_INTERVAL K_MSEC(10)
 
-static struct sensor_value accel_x_out, accel_y_out, accel_z_out;
-static struct sensor_value gyro_x_out, gyro_y_out, gyro_z_out;
-
-static KalmanFilter kf __attribute__((section(".data")));
+#define BUFFER_SIZE 5
 
 struct sensor_data {
     uint32_t timestamp;
@@ -44,6 +41,18 @@ struct sensor_data {
     float gyro_z;
     uint8_t battery_percentage;
 } __packed;
+
+struct sensor_data_buffer {
+    struct sensor_data data[BUFFER_SIZE];
+    uint8_t count;
+};
+
+static struct sensor_data_buffer s_data_buffer = {0};
+
+static struct sensor_value accel_x_out, accel_y_out, accel_z_out;
+static struct sensor_value gyro_x_out, gyro_y_out, gyro_z_out;
+
+static KalmanFilter kf __attribute__((section(".data")));
 
 struct calibration_data {
     bool valid;
@@ -59,7 +68,7 @@ static uint8_t current_battery_percentage = 0;
 
 static ssize_t read_index(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
 {
-    const struct sensor_data *data = attr->user_data;
+    const struct sensor_data_buffer *data = attr->user_data;
     return bt_gatt_attr_read(conn, attr, buf, len, offset, data, sizeof(*data));
 }
 
@@ -186,7 +195,7 @@ static ssize_t write_reference_and_calibration(struct bt_conn *conn, const struc
 BT_GATT_SERVICE_DEFINE(index_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E))),
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400002, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
-                           BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_index, NULL, &s_data),
+                           BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_index, NULL, &s_data_buffer),
     BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400003, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
                            BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_reference_and_calibration, (void*)DEVICE_DT_GET_ONE(st_lsm6dsl))
@@ -413,26 +422,55 @@ void main(void)
             s_data.gyro_z = kf.x[5];
             s_data.battery_percentage = current_battery_percentage;
 
+            struct sensor_data current_data = {
+                .timestamp = k_uptime_get_32() - reference_timestamp,
+                .index = index,
+                .accel_x = kf.x[0],
+                .accel_y = kf.x[1],
+                .accel_z = kf.x[2],
+                .gyro_x = kf.x[3],
+                .gyro_y = kf.x[4],
+                .gyro_z = kf.x[5],
+                .battery_percentage = current_battery_percentage
+            };
+
             printk("Timestamp: %u, Index: %u, Accel: [%.3f, %.3f, %.3f], Gyro: [%.3f, %.3f, %.3f], Battery: %u%%\n", 
                    s_data.timestamp, s_data.index, 
                    s_data.accel_x, s_data.accel_y, s_data.accel_z, 
                    s_data.gyro_x, s_data.gyro_y, s_data.gyro_z,
                    s_data.battery_percentage);
 
-            int retry_count = 0;
-            while (bt_gatt_notify(NULL, &index_svc.attrs[1], &s_data, sizeof(s_data)) == -ENOMEM && retry_count < MAX_RETRIES) {
-                printk("bt_gatt_notify failed: -ENOMEM. Retrying...\n");
-                retry_count++;
-                k_sleep(RETRY_DELAY);
+            s_data_buffer.data[s_data_buffer.count] = current_data;
+            s_data_buffer.count++;
+
+            // If the buffer is full, send it
+            if (s_data_buffer.count == BUFFER_SIZE) {
+                int retry_count = 0;
+                
+                // Prepare the buffer to send
+                uint8_t buffer_to_send[sizeof(uint8_t) + sizeof(s_data_buffer)];
+                buffer_to_send[0] = s_data_buffer.count;
+                memcpy(buffer_to_send + 1, &s_data_buffer, sizeof(s_data_buffer));
+
+                while (bt_gatt_notify(NULL, &index_svc.attrs[1], buffer_to_send, sizeof(buffer_to_send)) == -ENOMEM 
+                       && retry_count < MAX_RETRIES) {
+                    printk("bt_gatt_notify failed: -ENOMEM. Retrying...\n");
+                    retry_count++;
+                    k_sleep(RETRY_DELAY);
+                }
+
+                // Reset the buffer after sending
+                s_data_buffer.count = 0;
             }
 
             index++;
-            k_sleep(K_MSEC(30)); 
         }
 
         // Check if it's time to update battery percentage
         if (k_uptime_get() % BATTERY_UPDATE_INTERVAL.ticks == 0) {
             k_work_submit(&battery_work);
         }
+
+        k_sleep(K_MSEC(30)); 
     }
 }
