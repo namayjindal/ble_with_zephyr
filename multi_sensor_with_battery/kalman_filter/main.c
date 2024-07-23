@@ -19,6 +19,8 @@
 
 #include <zephyr/settings/settings.h>
 
+
+
 #include "kalman_filter.h"
 
 #define MAX_RETRIES 5
@@ -94,19 +96,6 @@ static struct settings_handler conf = {
 
 static uint32_t index = 0;
 
-static ssize_t write_reference(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                               const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
-    if (len != sizeof(uint32_t)) {
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-    }
-    
-    reference_timestamp = k_uptime_get_32();
-    index = 0;
-    
-    printk("Board written to. Timestamp reset to %u, index reset to 0\n", reference_timestamp);
-    return len;
-}
-
 static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
@@ -153,20 +142,22 @@ static ssize_t write_reference_and_calibration(struct bt_conn *conn, const struc
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
     }
 
-    if (len == sizeof(uint32_t)) {
-        // This is a reference timestamp write
-        reference_timestamp = k_uptime_get_32();
-        index = 0;
-        printk("Board written to. Timestamp reset to %u, index reset to 0\n", reference_timestamp);
-        return len;
-    } else if (len == 1) {
-        // This is a calibration trigger
+    if (len == 1) {
         const uint8_t *value = buf;
-        if (value[0] == 1) {
+
+        if(value[0] == 0) {
+            // This is a reference timestamp write
+            reference_timestamp = k_uptime_get_32();
+            index = 0;
+            printk("Board written to. Timestamp reset to %u, index reset to 0\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", reference_timestamp);
+        return len;
+    } 
+        else if (value[0] == 1) {
             calibrate_sensors(sensor_dev);
-            printk("Calibration triggered via BLE\n");
+            printk("Calibration triggered via BLE\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         }
         return len;
+
     } else {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
@@ -184,11 +175,11 @@ static ssize_t write_reference_and_calibration(struct bt_conn *conn, const struc
 
 // Modify your BLE service definition to pass the device pointer
 BT_GATT_SERVICE_DEFINE(index_svc,
-    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400001, 0xB5C3, 0xD393, 0xA0F9, 0xE50F24DCCA9E))),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400002, 0xB5C3, 0xD393, 0xA0F9, 0xE50F24DCCA9E)),
                            BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_index, NULL, &s_data),
     BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400006, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400003, 0xB5C3, 0xD393, 0xA0F9, 0xE50F24DCCA9E)),
                            BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_reference_and_calibration, (void*)DEVICE_DT_GET_ONE(st_lsm6dsl))
 );
 
@@ -262,7 +253,7 @@ void main(void)
     index = 0;
     const struct bt_data ad[] = {
         BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
+        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x6E400001, 0xB5C3, 0xD393, 0xA0F9, 0xE50F24DCCA9E)),
     };
     const struct bt_data sd[] = {
         BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
