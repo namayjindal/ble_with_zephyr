@@ -39,13 +39,39 @@
 #define LED1_NODE DT_ALIAS(led1)
 #define LED2_NODE DT_ALIAS(led2)
 
-/*
- * A build error on this line means your board is unsupported.
- * See the sample documentation for information on how to fix this.
- */
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(LED2_NODE, gpios);
+
+// Add these definitions for LED control
+#define LED_UPDATE_INTERVAL K_MSEC(1000)
+#define BATTERY_LOW_THRESHOLD 20
+#define BATTERY_FULL_THRESHOLD 95
+
+// Function to update LED states based on battery percentage
+static void update_leds(uint8_t battery_percentage)
+{
+    static bool led_state = true;
+    static int64_t last_toggle = 0;
+
+    if (battery_percentage >= BATTERY_FULL_THRESHOLD) {
+        // Battery full, solid green
+        gpio_pin_set_dt(&led_green, 1);
+        gpio_pin_set_dt(&led_red, 0);
+    } else if (battery_percentage < BATTERY_LOW_THRESHOLD) {
+        // Battery low, blinking red
+        if (k_uptime_get() - last_toggle >= LED_UPDATE_INTERVAL.ticks) {
+            led_state = !led_state;
+            gpio_pin_set_dt(&led_red, led_state);
+            gpio_pin_set_dt(&led_green, 0);
+            last_toggle = k_uptime_get();
+        }
+    } else {
+        // Battery normal, both LEDs off
+        gpio_pin_set_dt(&led_green, 0);
+        gpio_pin_set_dt(&led_red, 0);
+    }
+}
 
 struct sensor_data {
     uint32_t timestamp;
@@ -360,28 +386,52 @@ void main(void)
     kalman_filter_init(&kf);
     printk("Kalman filter initialized\n");
 
-    int ret;
-	bool led_state = true;
+    int ret_red;
+    int ret_green;
+	bool red_led_state = true;
+    bool green_led_state = true;
 
-	if (!gpio_is_ready_dt(&led_blue)) {
+	if (!gpio_is_ready_dt(&led_red)) {
 		return 0;
 	}
 
-	ret = gpio_pin_configure_dt(&led_blue, GPIO_OUTPUT_ACTIVE);
-	if (ret < 0) {
+    if (!gpio_is_ready_dt(&led_green)) {
 		return 0;
 	}
+
+	ret_red = gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_ACTIVE);
+	if (ret_red < 0) {
+		return 0;
+	}
+
+    ret_green = gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_ACTIVE);
+	if (ret_green < 0) {
+		return 0;
+	}
+
+    // Initialize LEDs
+    if (!device_is_ready(led_red.port) || !device_is_ready(led_green.port)) {
+        printk("Error: LEDs device not ready\n");
+        return;
+    }
+
+    int ret = gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_INACTIVE);
+    if (ret < 0) {
+        printk("Error %d: failed to configure red LED\n", ret);
+        return;
+    }
+
+    ret = gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
+    if (ret < 0) {
+        printk("Error %d: failed to configure green LED\n", ret);
+        return;
+    }
 
     while (1) {
 
-        ret = gpio_pin_toggle_dt(&led_blue);
-		if (ret < 0) {
-			return 0;
-		}
-
-		led_state = !led_state;
-		printf("LED state: %s\n", led_state ? "ON" : "OFF");
-		k_msleep(SLEEP_TIME_MS);
+        update_leds(current_battery_percentage);
+		// printf("LED state: %s\n", red_led_state ? "ON" : "OFF");
+		// k_msleep(SLEEP_TIME_MS);
 
         if (sensor_sample_fetch(lsm6dsl_dev) < 0) {
             printk("Sensor sample update error\n");
