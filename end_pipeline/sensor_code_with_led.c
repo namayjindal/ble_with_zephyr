@@ -25,7 +25,7 @@
 
 #define MAX_RETRIES 5
 #define RETRY_DELAY K_MSEC(10)
-#define BATTERY_UPDATE_INTERVAL K_MSEC(1000)
+#define BATTERY_UPDATE_INTERVAL K_MSEC(50)
 
 #define CALIBRATION_SAMPLES 100
 #define CALIBRATION_INTERVAL K_MSEC(10)
@@ -34,42 +34,96 @@
 
 #define SLEEP_TIME_MS   1000
 
-/* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
 #define LED1_NODE DT_ALIAS(led1)
 #define LED2_NODE DT_ALIAS(led2)
+
+#define BATTERY_LOW_THRESHOLD 20
+#define BATTERY_FULL_THRESHOLD 95
+#define BATTERY_CHARGING_THRESHOLD 4500  // millivolts, adjust as needed
 
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(LED2_NODE, gpios);
 
 // Add these definitions for LED control
-#define LED_UPDATE_INTERVAL K_MSEC(1000)
+#define LED_UPDATE_INTERVAL K_MSEC(50)
 #define BATTERY_LOW_THRESHOLD 20
 #define BATTERY_FULL_THRESHOLD 95
 
-// Function to update LED states based on battery percentage
-static void update_leds(uint8_t battery_percentage)
-{
-    static bool led_state = true;
-    static int64_t last_toggle = 0;
+static uint8_t current_battery_percentage = 0;
+static uint16_t current_battery_millivolt = 0;
 
-    if (battery_percentage >= BATTERY_FULL_THRESHOLD) {
-        // Battery full, solid green
-        gpio_pin_set_dt(&led_green, 1);
-        gpio_pin_set_dt(&led_red, 0);
+static void update_leds(uint8_t battery_percentage, uint16_t battery_mv)
+{
+    static int64_t last_toggle = 0;
+    static bool led_state = true;
+    static enum {
+        LED_OFF,
+        LED_RED_BLINK,
+        LED_GREEN_SOLID,
+        LED_GREEN_BLINK,
+        LED_BLUE_SOLID,
+        LED_RED_SOLID
+    } led_mode = LED_OFF;
+
+    // Determine the LED mode based on battery status
+    if (battery_mv >= BATTERY_CHARGING_THRESHOLD) {
+        led_mode = LED_GREEN_BLINK;  // Charging
+    } else if (battery_percentage >= BATTERY_FULL_THRESHOLD) {
+        led_mode = LED_GREEN_SOLID;  // Full
     } else if (battery_percentage < BATTERY_LOW_THRESHOLD) {
-        // Battery low, blinking red
-        if (k_uptime_get() - last_toggle >= LED_UPDATE_INTERVAL.ticks) {
-            led_state = !led_state;
-            gpio_pin_set_dt(&led_red, led_state);
-            gpio_pin_set_dt(&led_green, 0);
-            last_toggle = k_uptime_get();
-        }
+        led_mode = LED_RED_BLINK;  // Low
     } else {
-        // Battery normal, both LEDs off
-        gpio_pin_set_dt(&led_green, 0);
-        gpio_pin_set_dt(&led_red, 0);
+        led_mode = LED_OFF;  // Normal
+    }
+
+    // Update LEDs based on the mode
+    switch (led_mode) {
+        case LED_OFF:
+            gpio_pin_set_dt(&led_red, 0);
+            gpio_pin_set_dt(&led_green, 0);
+            gpio_pin_set_dt(&led_blue, 0);
+            printk("LED mode: LED_OFF\n");
+            break;
+        case LED_RED_BLINK:
+            if (k_uptime_get() - last_toggle >= LED_UPDATE_INTERVAL.ticks) {
+                led_state = !led_state;
+                gpio_pin_set_dt(&led_red, led_state);
+                gpio_pin_set_dt(&led_green, 0);
+                gpio_pin_set_dt(&led_blue, 0);
+                last_toggle = k_uptime_get();
+            }
+            printk("LED mode: LED_RED_BLINK\n");
+            break;
+        case LED_GREEN_SOLID:
+            gpio_pin_set_dt(&led_red, 0);
+            gpio_pin_set_dt(&led_green, 1);
+            gpio_pin_set_dt(&led_blue, 0);
+            printk("LED mode: LED_GREEN_SOLID\n");
+            break;
+        case LED_BLUE_SOLID:
+            gpio_pin_set_dt(&led_red, 0);
+            gpio_pin_set_dt(&led_green, 0);
+            gpio_pin_set_dt(&led_blue, 1);
+            printk("LED mode: LED_BLUE_SOLID\n");
+            break;
+        case LED_RED_SOLID:
+            gpio_pin_set_dt(&led_red, 1);
+            gpio_pin_set_dt(&led_green, 0);
+            gpio_pin_set_dt(&led_blue, 0);
+            printk("LED mode: LED_RED_SOLID\n");
+            break;
+        case LED_GREEN_BLINK:
+            if (k_uptime_get() - last_toggle >= LED_UPDATE_INTERVAL.ticks) {
+                led_state = !led_state;
+                gpio_pin_set_dt(&led_red, 0);
+                gpio_pin_set_dt(&led_green, led_state);
+                gpio_pin_set_dt(&led_blue, 0);
+                last_toggle = k_uptime_get();
+            }
+            printk("LED mode: LED_GREEN_BLINK\n");
+            break;
     }
 }
 
@@ -107,7 +161,6 @@ static struct calibration_data cal_data = {false, {0}, {0}};
 
 static struct sensor_data s_data;
 static uint32_t reference_timestamp = 0;
-static uint8_t current_battery_percentage = 0;
 
 static ssize_t read_index(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
 {
@@ -225,11 +278,11 @@ static ssize_t write_reference_and_calibration(struct bt_conn *conn, const struc
 
 // Modify your BLE service definition to pass the device pointer
 BT_GATT_SERVICE_DEFINE(index_svc,
-    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E))),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400002, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
                            BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_index, NULL, &s_data_buffer),
     BT_GATT_CCC(ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E400003, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x8E400006, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
                            BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_reference_and_calibration, (void*)DEVICE_DT_GET_ONE(st_lsm6dsl))
 );
 
@@ -289,9 +342,12 @@ static void battery_update_handler(struct k_work *work)
     battery_get_millivolt(&battery_millivolt);
     battery_get_percentage(&battery_percentage, battery_millivolt);
 
-    if (battery_percentage != current_battery_percentage) {
+    if (battery_percentage != current_battery_percentage || 
+        abs((int)battery_millivolt - (int)current_battery_millivolt) > 50) {
         current_battery_percentage = battery_percentage;
-        printk("Battery updated: %d%%\n", current_battery_percentage);
+        current_battery_millivolt = battery_millivolt;
+        printk("Battery updated: %d%% (%d mV)\n", current_battery_percentage, current_battery_millivolt);
+        update_leds(current_battery_percentage, current_battery_millivolt);
     }
 }
 
@@ -303,7 +359,7 @@ void main(void)
     index = 0;
     const struct bt_data ad[] = {
         BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x9E400001, 0xC5C3, 0xE393, 0xA0F9, 0xF50E24DCCA9E)),
+        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x8E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E)),
     };
     const struct bt_data sd[] = {
         BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
@@ -429,7 +485,7 @@ void main(void)
 
     while (1) {
 
-        update_leds(current_battery_percentage);
+        update_leds(current_battery_percentage, current_battery_millivolt);
 		// printf("LED state: %s\n", red_led_state ? "ON" : "OFF");
 		// k_msleep(SLEEP_TIME_MS);
 
@@ -499,6 +555,8 @@ void main(void)
             s_data.gyro_y = kf.x[4];
             s_data.gyro_z = kf.x[5];
             s_data.battery_percentage = current_battery_percentage;
+
+            printk("Battery millivolt - %u\n", current_battery_millivolt);
 
             struct sensor_data current_data = {
                 .timestamp = k_uptime_get_32() - reference_timestamp,
